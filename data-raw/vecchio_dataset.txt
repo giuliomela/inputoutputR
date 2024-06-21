@@ -1,0 +1,224 @@
+
+
+
+
+
+
+
+
+
+
+
+
+### SUPPLY TABLE
+
+# Tavola Supply comprendente tutti i settori e prodotti, sia prezzi base che d'acquisto
+
+supply_tables_raw <- read_sdmx(
+  paste0(
+    "https://sdmx.oecd.org/public/rest/data/OECD.SDD.NAD,DSD_NASU@DF_SUPPLY_T1500,2.0/A.ITA......V.?",
+    "startPeriod=",
+    ref_yr,
+    "&endPeriod=",
+    ref_yr,
+    "&dimensionAtObservation=AllDimensions"
+  )
+) |>
+  as_tibble()
+
+corr_table_codes <- bind_rows(
+  legend_oecd$products,
+  legend_oecd$sectors
+)
+
+# Supply matrix with oecd product and activity names
+
+supply_pb_df <- supply_tables_raw |>
+  filter(
+    PRODUCT %in% legend_oecd$products$code_oecd,
+    ACTIVITY %in% legend_oecd$sectors$code_oecd
+  ) |>
+  mutate(ObsValue = as.double(ObsValue)) |>
+  select(PRODUCT, ACTIVITY, ObsValue) |>
+  pivot_wider(names_from = ACTIVITY, values_from = ObsValue)
+
+oecd_product_names <- supply_pb_df$PRODUCT
+
+supply_pb <- supply_pb_df |>
+  select(!PRODUCT) |>
+  as.matrix()
+
+rownames(supply_pb) <- oecd_product_names
+
+#renaming columns and rows with ISTAT codes
+
+colnames(supply_pb) = corr_table_codes$code_it[match(colnames(supply_pb), corr_table_codes$code_oecd)]
+
+rownames(supply_pb) = corr_table_codes$code_it[match(rownames(supply_pb), corr_table_codes$code_oecd)]
+
+# Summing up rows and columns with the same name
+
+supply_pb <- rowsum(supply_pb, row.names(supply_pb))
+
+supply_pb <- t(rowsum(t(supply_pb), group = colnames(supply_pb), na.rm = T))
+
+# Reordering the matrix
+
+supply_pb <- supply_pb[legend_oecd$order$products, legend_oecd$order$sectors]
+
+pippo <- read_sdmx("https://sdmx.oecd.org/public/rest/data/OECD.SDD.NAD,DSD_NASU@DF_SUPPLY_T1500,2.0/A.ITA.......?startPeriod=2019&endPeriod=2019&dimensionAtObservation=AllDimensions")
+# intermediate consumption
+
+
+
+use_tables_codes_pb <- c(
+  #
+  #use_pa = "DF_USEPP_T1600/A.ITA.P2.,", #use at purchasers' prices
+  #use_t_pa = "DF_USEPP_T1602/A.ITA.P2.,", #use import at purchasers' prices
+  use_pb = "DF_USEBP_T1610,/A.ITA.P2.", # use at base prices
+  use_t_pb = "DF_USEBP_T1612,/A.ITA.P2." # use import at base prices
+  #va = "DF_USEVA_T1600,/A.ITA.P2." #value added and its components
+   # VAT
+)
+
+
+
+
+use_tables_raw <- map(
+  use_tables_codes_pb,
+  \(x) {
+
+    dwn_url <- paste0(
+      base_url,
+      x,
+      products_sectors_url,
+      start_yr_url,
+      end_yr_url,
+      last_part_url
+    )
+
+    out <- read_sdmx(dwn_url)
+
+    out
+
+  }
+) |>
+  set_names(names(use_tables_codes_pb))
+
+# Use tables at base prices
+
+use_tables_pb <- map(
+  use_tables_raw,
+  \(x){
+
+    out <- x |>
+    filter(
+      PRODUCT %in% legend_oecd$products$code_oecd,
+      ACTIVITY %in% legend_oecd$sectors$code_oecd,
+      PRICE_BASE == "V") |>
+    mutate(ObsValue = as.double(ObsValue)) |>
+    select(PRODUCT, ACTIVITY, ObsValue) |>
+    pivot_wider(names_from = ACTIVITY, values_from = ObsValue)
+
+    prod_names <- out$PRODUCT
+
+    out <- out |>
+      select(!PRODUCT) |>
+      as.matrix()
+
+        rownames(out) <- prod_names
+
+    colnames(out) = corr_table_codes$code_it[match(colnames(out), corr_table_codes$code_oecd)]
+
+    rownames(out) = corr_table_codes$code_it[match(rownames(out), corr_table_codes$code_oecd)]
+
+    # Summing up rows and columns with the same name
+
+    out <- rowsum(out, row.names(out))
+
+    out <- t(rowsum(t(out), group = colnames(out), na.rm = T))
+
+    # Reordering the matrix
+
+    out <- out[legend_oecd$order$products, legend_oecd$order$sectors]
+
+    out
+
+
+  }
+)
+
+pippo <- read_sdmx("https://sdmx.oecd.org/public/rest/data/OECD.SDD.NAD,DSD_NASU@DF_VALUATION_T1620,/A.ITA.......?startPeriod=2019&endPeriod=2019&dimensionAtObservation=AllDimensions")
+
+
+### VALUATION TABLES
+
+valuation_tables_codes <- c(
+  margins = "DF_VALUATION_T1620,", # trade and transport margins
+  taxes_less_subs = "DF_VALUATION_T1630," # taxes less subsidies on products
+  #taxes = "DF_VALUATION_T1633,", #taxes on products
+  #subs = "DF_VALUATION_T1634,", # subsidies on products
+  #taxes_less_subs_vat = "DF_VALUATION_T1631,", #taxes less subsidies on products excluding VAT
+  #vat = "DF_VALUATION_T1632," # vat
+)
+
+valuation_tables_raw <- map(
+  valuation_tables_codes,
+  \(x) {
+
+    dwn_url <- paste0(
+      "https://sdmx.oecd.org/public/rest/data/OECD.SDD.NAD,DSD_NASU@",
+      x,
+      "/A.ITA.P6+P53+P52+P51G+P3S13+P3S15+P3S14DC+P2.T+S95+S96+S94+R93+R90T92+Q87_88+Q86+N80T82+N78+N79+N77+M74_75+M73+M72+M71+M69_70+L68B+L68A+K66+K65+K64+J62_63+J61+J59_60+J58+I+H53+H52+H51+H50+H49+G47+G46+G45+E37T39+E36+C33+C31_32+C30+C29+C28+C27+C26+C25+C24+C23+C22+C21+C20+C19+C17+C18+C16+C13T15+C10T12+A03+A02+A01+B+D+F+J+O+P+U.CPA08_S96+CPA08_S95+CPA08_S94+CPA08_R93+CPA08_R90T92+CPA08_Q87_88+CPA08_Q86+CPA08_N80T82+CPA08_N79+CPA08_N78+CPA08_N77+CPA08_M74_75+CPA08_M73+CPA08_M72+CPA08_M71+CPA08_M69_70+CPA08_L68B+CPA08_L68A+CPA08_K66+CPA08_K65+CPA08_K64+CPA08_J62_63+CPA08_J61+CPA08_J59_60+CPA08_J58+CPA08_H53+CPA08_H52+CPA08_H51+CPA08_H50+CPA08_H49+CPA08_G47+CPA08_G46+CPA08_G45+CPA08_E37T39+CPA08_E36+CPA08_C33+CPA08_C31_32+CPA08_C30+CPA08_C29+CPA08_C28+CPA08_C27+CPA08_C26+CPA08_C25+CPA08_C24+CPA08_C23+CPA08_C22+CPA08_C21+CPA08_C20+CPA08_C19+CPA08_C18+CPA08_C17+CPA08_C16+CPA08_C13T15+CPA08_C10T12+CPA08_A03+CPA08_A02+CPA08_A01+CPA08_B+CPA08_D+CPA08_F+CPA08_I+CPA08_O+CPA08_P+CPA08_T+CPA08_U...V.?",
+      start_yr_url,
+      end_yr_url,
+      last_part_url
+    )
+
+    out <- read_sdmx(dwn_url)
+
+    out
+
+  }
+) |>
+  set_names(names(valuation_tables_codes))
+
+valuation_tables <- map(
+  valuation_tables_raw,
+  \(x){
+
+    out <- x |>
+      filter(
+        PRODUCT %in% legend_oecd$products$code_oecd,
+        ACTIVITY %in% legend_oecd$sectors$code_oecd) |>
+      mutate(ObsValue = as.double(ObsValue)) |>
+      select(PRODUCT, ACTIVITY, ObsValue) |>
+      pivot_wider(names_from = ACTIVITY, values_from = ObsValue)
+
+    prod_names <- out$PRODUCT
+
+    out <- out |>
+      select(!PRODUCT) |>
+      as.matrix()
+
+    rownames(out) <- prod_names
+
+    colnames(out) = corr_table_codes$code_it[match(colnames(out), corr_table_codes$code_oecd)]
+
+    rownames(out) = corr_table_codes$code_it[match(rownames(out), corr_table_codes$code_oecd)]
+
+    # Summing up rows and columns with the same name
+
+    out <- rowsum(out, row.names(out))
+
+    out <- t(rowsum(t(out), group = colnames(out), na.rm = T))
+
+    # Reordering the matrix
+
+    out <- out[legend_oecd$order$products, legend_oecd$order$sectors]
+
+    out
+
+
+  }
+)

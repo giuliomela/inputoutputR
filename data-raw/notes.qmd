@@ -1,0 +1,622 @@
+---
+title: "Modello SUT"
+author: "Giulio Mela"
+format: html
+---
+
+```{r}
+#| message: false
+
+
+library(tidyverse)
+library(readxl)
+library(here)
+library(gt)
+library(gtExtras)
+
+table_dimension <- 62 # number of sectors
+
+data_path <- here(
+  "data-raw",
+  "nuove_tavole"
+)
+
+table_names <- list.files(data_path)
+
+#Secotr and product codes and labels
+
+legend <- c("products", "sectors") |>
+  set_names() |>
+  map(
+    \(x) read_excel(
+      here("data-raw", "legend_62.xlsx"),
+      sheet = x
+    )
+  )
+
+
+### Loading matrices
+
+# tables_to_load <- str_subset(
+#   table_names,
+#   "63B"
+# ) |>
+#   str_subset(
+#     "IMPORT|SUPPLY|USE"
+#   )
+
+# tables_to_load <- tables_to_load[!str_detect(
+#   tables_to_load,
+#     "PYP"
+#   )]
+
+# defining the cell range to extract
+
+cell_range <- "C7:BL68" # 62x62 matrices
+
+tables_raw <- table_names |>
+  str_remove(".xlsx") |>
+  set_names() |>
+  map(
+    \(x) {
+
+    table <- read_excel(
+      here(data_path, paste0(x, ".xlsx")),
+      sheet = 1, # 2019 data
+      range = cell_range,
+      col_names = FALSE
+    )
+
+    table
+
+    }
+  )
+
+#check if the matrices have 63 rows and columns
+
+matrix_check <- map_dbl(
+  tables_raw,
+  \(x) {
+    rows <- nrow(x)
+    cols <- ncol(x)
+
+    sixtythree <- (rows + cols) == 124
+
+    square <- rows == cols
+
+    square + sixtythree
+
+    }
+) |> sum()
+
+if(matrix_check != length(tables_raw) * 2) stop("Le matrici non sono quadrate e/o di dimensione inferiore a 62")
+
+
+# Setting matrix row and column names
+
+intermediate_matrices <- map(
+  tables_raw,
+  \(x) {
+
+  output <- as.matrix(x)
+
+  colnames(output) <- legend$sectors$code
+
+  rownames(output) <- legend$products$code
+
+  output
+
+  }
+)
+
+# Loading value added
+
+range_va <- "C76:BL84"
+
+    v_added <- read_excel(
+      here(data_path, "use.xlsx"),
+      sheet = 1, # 2019 data
+      range = range_va,
+      col_names = FALSE
+    ) |> 
+      mutate(across(everything(), \(x) if_else(
+        is.na(x),
+        0,
+        x
+      ))) |> 
+      as.matrix()
+
+    colnames(v_added) <- legend$sectors$code
+    
+    rown_names_va <- read_excel(
+      here(data_path, "use.xlsx"),
+      sheet = 1, # 2019 data
+      range = "B76:B84",
+      col_names = FALSE
+    ) |> pull("...1")
+    
+    rownames(v_added) <- rown_names_va
+
+```
+
+
+## Obiettivo
+
+Questo è un tentativo di ricostruzione del modello SUT utilizzato per la valutazione dell'impatto socio-economico derivante dalla realizzazione della *gigafactory* di Teverola.
+
+## La matrice *make* {#sec-make}
+
+La matrice *make*, che ha i settori sulle righe e i prodotti sulle colonne, racchiude informazioni sul contributo di ciascun settore alla produzione di un determinato prodotto. La matrice *make* è la trasporta della matrice *supply* fornita dall'ISTAT. La *supply* scompone la produzione dei vari settori nei diversi prodotti. La tabella *supply* descrive come la produzione locale soddisfi parte della domanda finale, la cui restante parte viene soddisfatta dalle importazioni. Il totale dell’offerta deve coincidere, come per le tabelle IO convenzionali, con la domanda complessiva descritta dalla matrice *use*.
+
+```{r}
+#| label: make
+
+# defining the make matrix
+
+make <- t(intermediate_matrices$supply)
+
+gt(
+  as.data.frame(
+    make,
+    rownames = TRUE
+    ),
+  rownames_to_stub = TRUE
+  )
+```
+
+Le colonne della matrice *make* rappresentano il contributo di ciascun settore a ciascun prodotto (*market share*). La lettura per riga, invece, restituisce le quote dei vari prodotti in ciascun settore (*product mix*).
+
+## La matrice *Use* {#sec-use}
+
+La matrice *use* fornisce le ricette tecniche dei vari prodotti, come nel modello simmetrico input/output. Sulle righe di questa matrice ci sono i prodotti, mentre sulle colonne i settori. Quindi, ogni colonna rappresenta la ricetta tecnica di ciascun prodotto.
+
+```{r}
+#| label: use
+
+use <- intermediate_matrices$use
+
+gt(
+  as.data.frame(
+    use,
+    rownames = TRUE
+    ),
+  rownames_to_stub = TRUE
+  )
+
+```
+
+# Il modello SUT {#sec-sut}
+
+Il modello SUT si poggia su due relazioni fondamentali: quella tecnica e quella allocativa. La relazione tecnica determina la domanda intermedia di ciascun prodotto da parte dei settori e, attraverso la domanda finale esogena, la domanda totale in termini di prodotti. La relazione allocativa, invece, determina - una volta definita la domanda di prodotti - l'output settoriale di ciascuna area.
+
+I parametri tecnici di ciascun settore, ovverosia la "ricetta" dei costi intermedi, viene calcolata tramite il rapporto tra la quantità di prodotto intermedio $i-esimo$ necessaria a produrre un'unità di output del settore $j-esimo$, comprensivo del valore aggiunto. Tali parametri, denominati $b_{ij}$. La matrice dei parametri $b_{ij}$ è detta matrice $\mathbf{B}$.
+
+```{r}
+#| label: B
+
+total_prod <- v_added["Produzione ai prezzi base", ]
+
+B <- use %*% diag(total_prod^-1)
+
+gt(
+  as.data.frame(
+    B,
+    rownames = TRUE
+    ),
+  rownames_to_stub = TRUE
+  )
+```
+
+I parametri tecnici contenuti nella matrice $\mathbf{B}$ forniscono informazioni sulle quantità di prodotti intermedi $u_{ij}$ necessari alla produzione dei vari settori $j$. La provenienza di tali prodotti intermedi può essere sia nazionale che estera. I parametri $t_{ij}$, racchiusi nella matrice $\mathbf{T}$ (o *use import*) permettono di capire quanta parte di questi input intermedi provenga dall'economia domestica o dall'estero. La matrice $\mathbf{T}$ è ottenuta dividendo, elemento per elemento, la matrice $\mathbf{T}$ per la matrice $\mathbf{use}$. Nel caso in cui un elemento della matrice $\mathbf{use}$ sia negativo il corrispondente elemento della matrice $\mathbf{T}$ viene posto uguale a zero.
+
+```{r}
+#| label: fig-T
+#| tbl-cap: "Matrice use-import o matrice T"
+
+use_import <- intermediate_matrices$import /
+  intermediate_matrices$use
+
+use_import[is.na(use_import)] <- 0
+
+gt(
+  as.data.frame(
+    use_import,
+    rownames = TRUE
+    ),
+  rownames_to_stub = TRUE
+  )
+
+```
+
+Il modello SUT è caratterizzato anche dalla presenza di una matrice *make* che contiene parametri detti *market share*. Tali parametri descrivono la quota parte di ciascun prodotto che viene prodotta dai vari settori. La matrice *make* viene anche denominata matrice $\mathbf{D}$ e le *market share* come $d_{ij}$
+
+```{r}
+#| label: D
+#| fig-cap: "Matrice D o matrice delle market share"
+
+D <- make %*% diag(colSums(make)^-1)
+
+colnames(D) <- colnames(make)
+
+gt(
+  as.data.frame(
+    D,
+    rownames = TRUE
+    ),
+  rownames_to_stub = TRUE
+  )
+```
+
+La matrice inversa L, di tipo Leontieviano, è quindi data da:
+
+$$
+\mathbf{L} = \left[ 
+
+\mathbf{I} - \left(
+
+\begin{array}{11}
+
+\mathbf{0} & \mathbf{B} \times \mathbf{T}\\
+
+\mathbf{D} & \mathbf{0}
+
+\end{array}
+
+\right) 
+
+\right]^{-1}
+$$
+
+Nel caso del modello a 62 settori preso in considerazione, la matrice L dei moltiplicatori è:
+
+```{r}
+#| label: fig-L
+#| fig-cap: "Matrice L dei moltiplicatori"
+
+I <- diag(rep(1, 124))
+
+zero_matrix <- diag(rep(0, 62))
+
+R <- B * (1 - use_import) # matrice data da 1 - coefficienti di importazione. Moltiplicazione elemento per elemento
+
+L <- solve(I - cbind(
+  rbind(zero_matrix, D),
+  rbind(R, zero_matrix)
+)
+)
+
+rownames(L) <- c(
+  legend$products$code,
+  legend$sectors$code
+)
+
+colnames(L) <- c(
+  legend$products$code,
+  legend$sectors$code
+)
+
+gt(
+  as.data.frame(
+    L,
+    rownames = TRUE
+    ),
+  rownames_to_stub = TRUE
+  )
+
+```
+
+Una volta ottenuta la matrice dei moltiplicatori, è possibile calcolare la variazione dell'output dovuta a una variazione della domanda finale. Poiché il modello è lineare, una variazione in positivo o in negativo della domanda finale produce gli stessi effetti sull'output, anche se di segno opposto. Per questo motivo, quando si deve valutare la creazione di un nuovo settore (come nel caso FAAM) è preferibile valutare l'effetto (negativo) dovuto alla sua eliminazione piuttosto che il contrario. Per farlo è sufficiente variare le componenti della domanda finale interessate dal settore stesso.
+
+La domanda finale è composta da:
+
+- spesa per i consumi finali delle famiglie,
+- spesa per i consumi finali delle istituzioni sociali,
+- spesa per i consumi finali delle amministrazioni pubbliche,
+- Investimenti fissi lordi,
+- Oggetti di valore,
+- Variazione delle scorte,
+- Esportazioni.
+
+Moltiplicando il vettore della domanda finale per la matrice inversa è possibile ottenere l'output, a partire dal quale, poi, si possono calcolare il valore aggiunto, le importazioni intermedie, le imposte indirette e gli occupati.
+
+Ad esempio, un aumento della domanda finale di prodotti dell'agricoltura pari a 500 milioni di euro, genererebbe il seguente impatto:
+
+```{r}
+
+final_demand_change <- c(500, rep(0, 61+62))
+
+names(final_demand_change) <- c(
+  legend$products$code,
+  legend$sectors$code
+)
+
+output_impact <- L %*% final_demand_change
+
+rownames(output_impact) <- c(
+  legend$products$code,
+  legend$sectors$code
+)
+
+gt(
+  as.data.frame(
+    output_impact,
+    rownames = TRUE
+    ),
+  rownames_to_stub = TRUE
+  )
+
+```
+
+Gli istituti che producono le matrici *supply&use* diffondono tavole sia ai prezzi di base che ai prezzi di mercato. I prezzi di base non includono le imposte dirette nette sui prodotti (che sono funzione dell'ammontare dello scambio, come l'IVA) e i margini commerciali e di trasporto.
+Le imposte indirette nette sulla produzione sono invece inglobate nel valore aggiunto ai prezzi di base, insieme alla remunerazione dei fattori di produzione.
+
+I prezzi di base costituiscono una rappresentazione più fedele degli scambi che permette la quantificazione del settore commerciale e di quello dei trasporti.
+
+I prezzi di acquisto sono funzionali a valutare l'impatto degli investimenti.
+
+Le matrici delle imposte e dei margini, utili per passare dai prezzi di base a quelli di acquisto, sono diffusi dall'Istat.
+
+I modelli SUT possono essere statici o dinamici. Un modello dinamico è quello nel quale il consumo è endogeno. per poter incorporare il consumo nel modello è necessario essere in possesso di dati sulla propensione al risparmio e al consumo delle varie classi di reddito, oltre che della percentuale di reddito spesa per le varie tipologie di beni. In parole povere, è necessario ampliare il modello introducendo un'ulteriore matrice.
+L'ipotesi di fondo è che il consumo sia funzione lineare della produzione (della retribuzione lorda nello specifico): in questo modo si calcolano i coefficienti di retribuzione lorda, in maniera analoga a quelli del valore aggiunto o delle ULA. Tali coefficienti quantificano la parte di produzione che va a remunerare il fattore lavoro al netto dei contributi. I coefficienti vanno poi distribuiti nei vari decili di reddito, in maniera uguale per tutti i settori.
+
+Per poter completare il modello con consumo endogeno è necessario costruire una matrice settore X prodotto (matrice Hx nel modello SUT) che sintetizza tutte le informazioni viste finora. Ogni coefficiente della matrice quantifica di quanto aumenta la domanda dei vari prodotti dovuta a un aumento della produzione in un determinato settore. È un valore che è già al netto delle importazioni.
+
+Questa matrice Hx serve per calcolare la matrice L type2.
+
+## Simulazione FAAM - Type1 (prezzi di base)
+
+Provo a riprodurre la simulazione fatta nel 2023 con il foglio *Libreoffice* di IRPET partendo dall'analisi più semplice, quella Type1 e per la valutazione dell'impianto in esercizio (prezzi base).
+
+Il primo step è quello di integrare la matrice *use* e la matrice *import* con una riga e una colonna a rappresentare la *gigafactory* FAAM. In altre parole, viene creato un settore e un prodotto aggiuntivi che rappresentano l'impianto e ciò che produce e che vengono aggiunti alle matrici.
+
+```{r}
+
+input_names <- excel_sheets(
+  here("data-raw", "input.xlsx")
+)
+
+inputs <- map(input_names,
+
+\(x){ 
+
+  table <- read_excel(
+  here("data-raw", "input.xlsx"),
+  sheet = x,
+  col_names = F
+) 
+  
+  vec <- table |> pull(`...2`)
+  
+  names(vec) <- table |> pull(`...1`)
+  
+  vec
+} 
+) |> 
+  set_names(input_names)
+
+
+```
+Il vettore degli input, ovverosia la ricetta tecnica di FAAM, è chiaramente espressa ai prezzi di acquisto, in quanto sono quelli effettivamente pagati dall'azienda per l'acquisto degli input. Per poter effettuare l'analisi, tuttavia, è necessario trasformare tali vali ai prezzi di base, utilizzando le apposite matrici *tax* e *margins* fornite da Istat ed OECD. Nel caso di FAAM, essendo un'azienda che produce batterie per accumulo stazionario, la struttura dei margini e le tasse vengono approssimate con quelle del settore della fabbricazione delle apparecchiature elettriche (V27). 
+
+```{r}
+
+sector <- "V27"
+
+# intermediate_matrices$use_pa[, sector] <- intermediate_matrices$use_pa[, sector] -
+#   inputs$use_pa
+
+tax_share <- tibble(
+  product = names(inputs$use_pa),
+  input_use_pa = inputs$use_pa,
+  use_pa = intermediate_matrices$use_pa[, sector],
+  tax = intermediate_matrices$tax[, sector]
+) |> 
+  mutate(tax_share = if_else(
+    use_pa == 0,
+    0,
+    input_use_pa * tax / use_pa
+  )) |> 
+  pull(tax_share) |> 
+  set_names(names(inputs$use_pa))
+
+margins <- tibble(
+  product = names(inputs$use_pa),
+  input_use_pa = inputs$use_pa,
+  use_pa = intermediate_matrices$use_pa[, sector],
+  margins = intermediate_matrices$margins[, sector]
+) |> 
+  mutate(margins = if_else(
+    use_pa == 0,
+    0,
+    input_use_pa * margins / use_pa
+  )) |> 
+  pull(margins) |> 
+  set_names(names(inputs$use_pa))
+
+inputs[["use_pb"]] <- inputs$use_pa - tax_share - margins # vettore da aggiungere alla use_pb
+
+```
+La ricetta tecnica del settore *gigafactory* o FAAM ai prezzi di base, stimata a partire dai valori ai prezzi di acquisto (meno tasse e margini) viene aggiunta alla matrice *use* ai prezzi di base, facendo attenzione a sottrarre tali valori al settore V27 (fabbricazione apparecchiature elettriche).
+
+```{r}
+# sottraggo la ricetta tecnica FAAM al settore V27
+
+intermediate_matrices$use[,sector] <- intermediate_matrices$use[,sector] -
+  inputs[["use_pb"]]
+
+# Aggiungo riga e colonna corrispondenti al settore della gigafactory
+
+intermediate_matrices$use <- cbind(intermediate_matrices$use, FAAM = inputs[["use_pb"]]) #ricetta tecnica
+
+intermediate_matrices$use <- rbind(intermediate_matrices$use, FAAM = rep(0, 63)) # riga di zeri, tutta la produzione FAAM si ipotizza vada a soddisfare la domanda finale e, nello specifico, gli investimenti fissi lordi
+
+```
+
+Il passo successivo è costituito dalla costruzione della matrice $\mathbf{B}$ dei coefficienti tecnici. Per poterla calcolare, tuttavia, è necessario aggiornare il valore della produzione ai prezzi di base alla luce dell'introduzione del nuovo settore. Vanno quindi stimate le componenti del valore aggiunto generate dal settore FAAM: `r knitr::combine_words(rownames(v_added), and = " e ", oxford_comma = F)`. Questi parametri sono esogeni e vengono comunicati dall'azienda o calcolati sulla base delle informazioni fornite dall'azienda stessa.
+
+```{r}
+
+v_added_faam <-  c(
+  `Redditi da lavoro dipendente` = 23.3, # redditi lavoro dip
+  `Retribuzioni lorde` = 14.9, # retribuzioni lorde
+  `Altre imposte nette sulla produzione` = 18.6, # altre imposte nette sulla produzione
+  Ammortamenti = 101.6, # ammortamenti
+  `Risultato netto di gestione` = 454.679, # risultato netto gestione
+  `Risultato lordo di gestione` = 537.7, # risultato lordo di gestione
+  `Reddito misto lordo` = 0 # reddito misto lordo
+)
+
+v_added_faam[["Valore aggiunto ai prezzi di base"]] <- v_added_faam[["Redditi da lavoro dipendente"]] + v_added_faam[["Altre imposte nette sulla produzione"]] + v_added_faam[["Risultato lordo di gestione"]]
+
+v_added_faam[["Produzione ai prezzi base"]] <- sum(intermediate_matrices$use[, "FAAM"]) + # consumi intermedi
+  sum(tax_share) + v_added_faam[["Valore aggiunto ai prezzi di base"]]
+  
+#names(v_added_faam) <- NULL
+
+v_added <- cbind(v_added, FAAM = v_added_faam)
+
+v_added[, sector] <- v_added[, sector] - v_added[, "FAAM"] #sottraggo ivalori al settore V27
+
+```
+
+Una volta aggiornata la matrice del valore aggiunto, è possibile calcolare la matrice B.
+
+```{r}
+
+prod_pb <- v_added["Produzione ai prezzi base", ]
+
+B_matrix <- intermediate_matrices$use %*% diag(prod_pb^-1)
+
+gt(
+  as.data.frame(
+    B_matrix,
+    rownames = TRUE
+    ),
+  rownames_to_stub = TRUE
+  )
+
+```
+
+Per il calcolo della matrice T (o *use import*) è invece necessario aggiungere, alla matrice import, la colonna (e la riga) riferite alle importazioni di FAAM. Anche in questo caso i valori sono desunti dalle informazioni che fornisce l'azienda (% di materie prime di provenienza estera).
+
+```{r}
+
+input_use_import <- inputs$use_import * inputs$use_pb
+
+intermediate_matrices$import <- cbind(intermediate_matrices$import,
+                                      FAAM = input_use_import)
+
+intermediate_matrices$import <- rbind(intermediate_matrices$import,
+                                      FAAM = rep(0, 63)) # non ci sono importazioni di beni del settore FAAM
+
+# Calcolo della matrice T
+
+T_matrix <- intermediate_matrices$import /
+  intermediate_matrices$use
+
+T_matrix[is.na(T_matrix)] <- 0
+
+gt(
+  as.data.frame(
+    T_matrix,
+    rownames = TRUE
+    ),
+  rownames_to_stub = TRUE
+  )
+
+```
+
+Un altro importante elemento del modello SUT è la matrice *make share* o matrice D, che si calcola a partire dalla matrice *make*, che altro non è che la trasposta della matrice *supply* fornita dall'ISTAT. Anche in questo caso, però, la matrice *supply* deve essere ampliata con il nuovo settore della *gigafactory*. Poiché la produzione di batterie per accumulo stazionario va a soddisfare la sola domanda finale, è necessario aggiungere solo un valore alla matrice *supply*, quello del valore della produzione ai prezzi di base, all'intersezione tra la riga e la colonna FAAM. Tutti gli altri valori sono zero in quanto la produzione della *gigafactory* non funge da input intermedio per altri settori.
+
+```{r}
+
+intermediate_matrices$supply <- cbind(
+  intermediate_matrices$supply,
+  FAAM = rep(0, 62)
+)
+
+intermediate_matrices$supply <- rbind(
+  intermediate_matrices$supply,
+  FAAM = c(
+    rep(0, 62),
+    v_added_faam[["Produzione ai prezzi base"]]
+)
+)
+
+make_matrix <- t(intermediate_matrices$supply)
+
+D_matrix <- make_matrix %*% diag(colSums(make_matrix)^-1)
+
+colnames(D_matrix) <- colnames(make_matrix)
+
+gt(
+  as.data.frame(
+    D_matrix,
+    rownames = TRUE
+    ),
+  rownames_to_stub = TRUE
+  )
+
+```
+
+A questo punto è possibile calcolare la matrice inversa L e, quindi, procedere alla risoluzione del modello.
+
+```{r}
+
+I <- diag(rep(1, 63*2))
+
+zero_matrix <- diag(rep(0, 63))
+
+R_matrix <- B_matrix * (1 - T_matrix) # matrice data da 1 - coefficienti di importazione. Moltiplicazione elemento per elemento
+
+L_matrix <- solve(I - cbind(
+  rbind(zero_matrix, D_matrix),
+  rbind(R_matrix, zero_matrix)
+)
+)
+
+
+
+
+```
+
+L'impatto sull'output generato dalla realizzazione della nuova *gigafactory* viene calcolato moltiplicando la matrice inversa $\mathbf{L}$ per la domanda finale esogena. Poiché si stima che la produzione della *gigafactory* vada ad alimentare la sola domanda finale e che i sistemi di accumulo siano destinati solamente a usi industriali, il parametro della domanda finale da variare è quello riguardante gli investimenti fissi lordi il cui ammontare è pari al valore dell'output più le imposte nette sui prodotti.
+
+```{r}
+
+gross_fixed_inv <- sum(tax_share) + v_added_faam[["Produzione ai prezzi base"]]
+
+final_demand <- c(
+  rep(0, 62),
+  gross_fixed_inv * -1,
+  rep(0, 63)
+)
+
+names(final_demand) <- c(
+  legend$products$code,
+  legend$sectors$code
+)
+
+
+output <- L_matrix %*% final_demand
+
+rownames(output) <- c(
+  c(legend$products$code, "FAAM"),
+  c(legend$sectors$code, "FAAM")
+)
+
+gt(
+  as.data.frame(
+    output,
+    rownames = TRUE
+    ),
+  rownames_to_stub = TRUE
+  )
+
+
+
+```
+
+
+## g
+
